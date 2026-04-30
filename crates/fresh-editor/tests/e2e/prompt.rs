@@ -1,5 +1,97 @@
 use crate::common::harness::EditorTestHarness;
 
+/// Regression test for github.com/sinelaw/fresh/issues/1785
+///
+/// When `editor.show_prompt_line` is false (the default auto-hide mode),
+/// opening a prompt that immediately attaches a suggestions popup must
+/// keep the prompt input row visible — the popup should anchor *above*
+/// the prompt, not over it.
+///
+/// Before the fix, the popup could be drawn over the bottom row of the
+/// screen, hiding the prompt's `message` and the user's input.
+#[test]
+fn test_prompt_with_suggestions_visible_with_auto_hide() {
+    use crate::common::harness::HarnessOptions;
+    use fresh::input::commands::Suggestion;
+    use fresh::view::prompt::PromptType;
+
+    // Default harness; toggle auto-hide via the runtime API to exercise
+    // the auto-hide layout that real users see by default. (The harness
+    // force-enables `show_prompt_line` at startup so layout-sensitive
+    // tests stay stable; the runtime toggle is the supported way to
+    // reach the auto-hide path.)
+    let mut harness = EditorTestHarness::create(80, 24, HarnessOptions::new()).unwrap();
+
+    // Auto-hide the prompt line, matching the user-facing default
+    // (`show_prompt_line = false`). The harness force-enables the prompt
+    // line so the runtime toggle is the supported way to exercise the
+    // auto-hide path.
+    harness.editor_mut().toggle_prompt_line();
+    assert!(!harness.editor().prompt_line_visible());
+    harness.render().unwrap();
+
+    // Open a plugin-style prompt with two suggestions, mirroring the
+    // shape produced by `markdownSetComposeWidth` (the original repro).
+    let suggestions = vec![
+        Suggestion {
+            text: "None".to_string(),
+            description: Some("Use viewport width".to_string()),
+            value: None,
+            disabled: false,
+            keybinding: None,
+            source: None,
+        },
+        Suggestion {
+            text: "120".to_string(),
+            description: Some("Default compose width".to_string()),
+            value: None,
+            disabled: false,
+            keybinding: None,
+            source: None,
+        },
+    ];
+    harness.editor_mut().start_prompt_with_suggestions(
+        "Compose width: ".to_string(),
+        PromptType::Plugin {
+            custom_type: "markdown-compose-width".to_string(),
+        },
+        suggestions,
+    );
+    harness.render().unwrap();
+
+    // The prompt's message must appear on the bottom row of the screen.
+    // If the suggestions popup overlapped the prompt area, this row
+    // would contain the popup's bottom border instead.
+    let height = harness.buffer().area.height;
+    let bottom_row = harness.get_row_text(height - 1);
+    assert!(
+        bottom_row.contains("Compose width:"),
+        "Expected prompt message on bottom row when suggestions popup is open. \
+         Got bottom row: {:?}\nFull screen:\n{}",
+        bottom_row,
+        harness.screen_to_string(),
+    );
+
+    // The popup itself should still be visible, just above the prompt.
+    let screen = harness.screen_to_string();
+    assert!(
+        screen.contains("Use viewport width") && screen.contains("Default compose width"),
+        "Expected suggestions popup to render above the prompt.\nFull screen:\n{}",
+        screen,
+    );
+
+    // The bottom row must NOT contain the popup's bottom border. Together
+    // with the assertion above, this proves the popup is drawn strictly
+    // above the prompt row rather than over it.
+    assert!(
+        !bottom_row.contains('└') && !bottom_row.contains('┘'),
+        "Bottom row should be the prompt, not the popup's bottom border. \
+         Got: {:?}\nFull screen:\n{}",
+        bottom_row,
+        screen,
+    );
+}
+
 /// Test that the prompt is rendered correctly
 #[test]
 fn test_prompt_rendering() {

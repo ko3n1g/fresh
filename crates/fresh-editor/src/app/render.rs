@@ -837,7 +837,24 @@ impl Editor {
             self.cached_layout.search_options_layout = None;
         }
 
-        // Render prompt line if active
+        // Render prompt line if active.
+        //
+        // The layout reserves a 1-row prompt slot whenever `self.prompt` is
+        // some, but in pathological frames (e.g. mid-transition between two
+        // prompts, or unusual constraint solver results) the slot can end up
+        // anchored at `size.height` — i.e. one row off the bottom of the
+        // screen. Clamp the render area to the last visible row so the
+        // prompt input is always reachable; the popup positioning below
+        // applies the same clamp so the two stay aligned.
+        let prompt_row_area = if main_chunks[prompt_line_idx].y >= size.height && size.height > 0 {
+            ratatui::layout::Rect {
+                y: size.height - 1,
+                height: 1,
+                ..main_chunks[prompt_line_idx]
+            }
+        } else {
+            main_chunks[prompt_line_idx]
+        };
         if let Some(prompt) = &prompt {
             // Use specialized renderer for file/folder open prompt to show colorized path
             if matches!(
@@ -848,32 +865,24 @@ impl Editor {
                 if let Some(file_open_state) = &self.file_open_state {
                     StatusBarRenderer::render_file_open_prompt(
                         frame,
-                        main_chunks[prompt_line_idx],
+                        prompt_row_area,
                         prompt,
                         file_open_state,
                         &theme,
                     );
                 } else {
-                    StatusBarRenderer::render_prompt(
-                        frame,
-                        main_chunks[prompt_line_idx],
-                        prompt,
-                        &theme,
-                    );
+                    StatusBarRenderer::render_prompt(frame, prompt_row_area, prompt, &theme);
                 }
             } else {
-                StatusBarRenderer::render_prompt(
-                    frame,
-                    main_chunks[prompt_line_idx],
-                    prompt,
-                    &theme,
-                );
+                StatusBarRenderer::render_prompt(frame, prompt_row_area, prompt, &theme);
             }
         }
 
         // Render file browser popup or suggestions popup AFTER status bar + prompt,
         // so they overlay on top of both (fixes bottom border being overwritten by status bar)
-        self.render_prompt_popups(frame, main_chunks[prompt_line_idx], size.width);
+        // Pass `size` so the popup can clamp itself to the visible viewport, ensuring
+        // it never paints over the bottom row reserved for the active prompt.
+        self.render_prompt_popups(frame, prompt_row_area, size);
 
         // Render popups from the active buffer state
         // Clone theme to avoid borrow checker issues with active_state_mut()
@@ -1421,13 +1430,27 @@ impl Editor {
 
     /// Render file browser or suggestions popup as overlay above the prompt line.
     /// Called after status bar + prompt so the popup draws on top of both.
+    ///
+    /// The popup anchors itself just above `prompt_area`, but we additionally
+    /// clamp the anchor to `screen.height - 1` so the popup can never paint
+    /// over the bottom row of the screen — that row is reserved for the
+    /// prompt input. Without this clamp, layouts that briefly compute the
+    /// prompt at `y == screen.height` (for example, while the auto-hidden
+    /// prompt line is in the process of becoming visible) would draw the
+    /// popup over the area where the user expects the prompt to appear.
     fn render_prompt_popups(
         &mut self,
         frame: &mut Frame,
         prompt_area: ratatui::layout::Rect,
-        width: u16,
+        screen: ratatui::layout::Rect,
     ) {
         let Some(prompt) = &self.prompt else { return };
+        let width = screen.width;
+
+        // Anchor the popup's bottom edge above the row reserved for the
+        // prompt. The reserved row is the visible bottom row of the screen.
+        let reserved_prompt_y = screen.height.saturating_sub(1);
+        let anchor_y = prompt_area.y.min(reserved_prompt_y);
 
         if matches!(
             prompt.prompt_type,
@@ -1436,10 +1459,10 @@ impl Editor {
             let Some(file_open_state) = &self.file_open_state else {
                 return;
             };
-            let max_height = prompt_area.y.saturating_sub(1).min(20);
+            let max_height = anchor_y.saturating_sub(1).min(20);
             let popup_area = ratatui::layout::Rect {
                 x: 0,
-                y: prompt_area.y.saturating_sub(max_height),
+                y: anchor_y.saturating_sub(max_height),
                 width,
                 height: max_height,
             };
@@ -1466,7 +1489,7 @@ impl Editor {
 
         let suggestions_area = ratatui::layout::Rect {
             x: 0,
-            y: prompt_area.y.saturating_sub(height),
+            y: anchor_y.saturating_sub(height),
             width,
             height: height - hints_height,
         };
@@ -1494,7 +1517,7 @@ impl Editor {
         if is_quick_open {
             let hints_area = ratatui::layout::Rect {
                 x: 0,
-                y: prompt_area.y.saturating_sub(hints_height),
+                y: anchor_y.saturating_sub(hints_height),
                 width,
                 height: hints_height,
             };
